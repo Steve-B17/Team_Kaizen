@@ -3,3 +3,8 @@ pandas
 sqlalchemy
 psycopg2-binary
 python-dotenv
+torch 
+transformers 
+datasets 
+scikit-learn
+transformers[torch]
