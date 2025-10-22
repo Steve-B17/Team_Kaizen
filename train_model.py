@@ -1,3 +1,4 @@
+# In train_model.py
 import os
 import sys
 import json
@@ -55,7 +56,7 @@ def compute_metrics(eval_pred):
     predictions, labels = eval_pred
     predictions = np.argmax(predictions, axis=1)
     precision, recall, f1, _ = precision_recall_fscore_support(
-        labels, predictions, average="macro", zero_division=0
+        labels, predictions, average="macro"
     )
     acc = accuracy_score(labels, predictions)
     return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
@@ -64,32 +65,20 @@ def compute_metrics(eval_pred):
 def plot_training_history(history):
     """Plots the training and validation loss and accuracy from the trainer history."""
     eval_logs = [log for log in history if 'eval_loss' in log]
-    train_logs = [log for log in history if 'loss' in log and 'eval_loss' not in log]
-    
     if not eval_logs:
         print("No evaluation logs found. Cannot plot history.")
         return
 
-    # Align training and eval logs by epoch
-    eval_epochs = [log['epoch'] for log in eval_logs]
+    epochs = [log['epoch'] for log in eval_logs]
+    train_loss = [log.get('loss') for log in eval_logs]
     eval_loss = [log['eval_loss'] for log in eval_logs]
     eval_accuracy = [log['eval_accuracy'] for log in eval_logs]
-    
-    # Get the training loss from the step closest to the eval epoch
-    train_loss_map = {log['epoch']: log['loss'] for log in train_logs}
-    train_loss = [train_loss_map.get(epoch, None) for epoch in eval_epochs]
 
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
-    
-    # Filter out None values if training loss wasn't logged at the exact eval epoch
-    valid_train_epochs = [e for e, t in zip(eval_epochs, train_loss) if t is not None]
-    valid_train_loss = [t for t in train_loss if t is not None]
-    
-    if valid_train_loss:
-        plt.plot(valid_train_epochs, valid_train_loss, 'o-', label='Training Loss')
-        
-    plt.plot(eval_epochs, eval_loss, 'o-', label='Validation Loss')
+    if train_loss[0] is not None:
+        plt.plot(epochs, train_loss, 'o-', label='Training Loss')
+    plt.plot(epochs, eval_loss, 'o-', label='Validation Loss')
     plt.title('Training & Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
@@ -97,7 +86,7 @@ def plot_training_history(history):
     plt.grid(True)
 
     plt.subplot(1, 2, 2)
-    plt.plot(eval_epochs, eval_accuracy, 'o-', label='Validation Accuracy', color='orange')
+    plt.plot(epochs, eval_accuracy, 'o-', label='Validation Accuracy', color='orange')
     plt.title('Validation Accuracy')
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy')
@@ -109,48 +98,23 @@ def plot_training_history(history):
 
 # --- Main Training Function ---
 def train_model(output_path="./challenger_model"):
-    """
-    Fetches the latest training data AND feedback, combines them,
-    and trains a new challenger model.
-    """
-    # 1. Fetch and Combine Data
-    print("🚀 Starting retraining pipeline...")
+    # 1. Fetch and Prepare Data
     engine = get_db_engine()
-    
-    # Fetch original training data
-    original_train_df = fetch_data_from_table(engine, "train_set")
-    if original_train_df.empty:
-        print("❌ Original training data not found. Aborting.", file=sys.stderr)
+    full_train_df = fetch_data_from_table(engine, "train_set")
+    if full_train_df.empty:
+        print("❌ Training data not found.", file=sys.stderr)
         return None
-    
-    # Fetch only the CORRECTED mistakes from feedback
-    print("Fetching new feedback...")
-    feedback_df = pd.read_sql(
-        "SELECT utterance, correct_intent AS intent FROM feedback_logs WHERE is_correct = false",
-        engine
-    )
-    
-    if feedback_df.empty:
-        print("ℹ️ No new incorrect feedback to train on. Training on original data only.")
-        combined_df = original_train_df
-    else:
-        print(f"✅ Fetched {len(original_train_df)} original rows and {len(feedback_df)} new rows from feedback.")
-        # Combine datasets and remove duplicates, keeping the feedback (last) as truth
-        combined_df = pd.concat([original_train_df, feedback_df], ignore_index=True)
-        combined_df.drop_duplicates(subset=['utterance'], keep='last', inplace=True)
-        print(f"Total combined rows after deduplication: {len(combined_df)}")
 
-    # 2. Prepare Data for Training
     train_df, val_df = train_test_split(
-        combined_df, test_size=0.1, random_state=42, stratify=combined_df['intent']
+        full_train_df, test_size=0.1, random_state=42, stratify=full_train_df['intent']
     )
 
-    all_intents = sorted(combined_df["intent"].astype(str).unique())
+    all_intents = sorted(full_train_df["intent"].astype(str).unique())
     label2id = {label: i for i, label in enumerate(all_intents)}
     id2label = {i: label for i, label in enumerate(all_intents)}
     num_labels = len(all_intents)
 
-    # 3. Load Tokenizer and Preprocess Data
+    # 2. Load Tokenizer and Preprocess Data
     tokenizer = AutoTokenizer.from_pretrained(MODEL_CHECKPOINT)
 
     def preprocess_function(examples):
@@ -163,7 +127,7 @@ def train_model(output_path="./challenger_model"):
     tokenized_train_dataset = train_dataset.map(preprocess_function, batched=True)
     tokenized_val_dataset = val_dataset.map(preprocess_function, batched=True)
 
-    # 4. Load Model
+    # 3. Load Model <-- THIS IS THE MISSING PIECE
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_CHECKPOINT,
         num_labels=num_labels,
@@ -171,20 +135,16 @@ def train_model(output_path="./challenger_model"):
         label2id=label2id,
     )
 
-    # 5. Define Training Arguments and Trainer
+    # 4. Define Training Arguments and Trainer
     training_args = TrainingArguments(
         output_dir="./training_output",
         num_train_epochs=5,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
         weight_decay=0.01,
-        logging_strategy="epoch",  # Log at the end of each epoch
-        evaluation_strategy="epoch", # Evaluate at the end of each epoch
-        save_strategy="epoch",     # Save at the end of each epoch
-        load_best_model_at_end=True, # Load the best model at the end of training
+        logging_steps=10,
+        do_eval=True,  # <-- Use this argument for older versions
         save_total_limit=2,
-        metric_for_best_model="f1", # Use F1 score to determine the best model
-        report_to="none", # Disables wandb logging
     )
 
     trainer = Trainer(
@@ -196,7 +156,7 @@ def train_model(output_path="./challenger_model"):
         compute_metrics=compute_metrics,
     )
     
-    # 6. Train and Save
+    # 5. Train and Save
     print("🚀 Starting training for the Challenger model...")
     trainer.train()
 
@@ -214,6 +174,4 @@ def train_model(output_path="./challenger_model"):
     return output_path
 
 if __name__ == "__main__":
-    # This will train and save the model to "./challenger_model"
-    # which is what `run_training_pipeline.py` expects.
     train_model()

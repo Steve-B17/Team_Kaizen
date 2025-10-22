@@ -9,3 +9,15 @@ datasets
 scikit-learn
 transformers[torch]
 streamlit
+matplotlib
+fastapi
+uvicorn
+langchain
+langchain-community
+langchain-google-genai
+langchain-qdrant
+langchain-text-splitters
+langchain-core
+langchain.prompts
+langchain.chains
+langchain.llms
