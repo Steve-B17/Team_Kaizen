@@ -124,7 +124,7 @@ The backend handles the core logic of intent prediction and feedback logging.
 
 1.  **Navigate to the project root directory:**
     ```bash
-    cd C:\Mehul\ALLmyCODINGstuff\Hackathons\ASAPP
+    cd root_directory
     ```
 2.  **Create and activate a virtual environment (recommended):**
     ```bash
