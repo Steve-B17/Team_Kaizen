@@ -8,3 +8,6 @@ transformers
 datasets 
 scikit-learn
 transformers[torch]
+matplotlib
+fastapi
+uvicorn
