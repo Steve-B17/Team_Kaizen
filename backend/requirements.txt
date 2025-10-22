@@ -18,6 +18,5 @@ langchain-google-genai
 langchain-qdrant
 langchain-text-splitters
 langchain-core
-langchain.prompts
-langchain.chains
-langchain.llms
+bs4
+aiohttp

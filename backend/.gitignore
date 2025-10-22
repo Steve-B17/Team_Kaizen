@@ -3,3 +3,4 @@
 __pycache__/
 intent_model/
 challenger_model/
+.venv
