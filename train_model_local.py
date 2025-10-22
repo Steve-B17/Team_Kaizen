@@ -1,88 +1,176 @@
-import pandas as pd
-from datasets import Dataset
-from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification, Trainer, TrainingArguments
-import torch
-import json
 import os
+import sys
+import pandas as pd
+import numpy as np
+import torch
+from sqlalchemy import create_engine
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from datasets import Dataset
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
+from dotenv import load_dotenv
 
-# -------------------------------
-# Config
-# -------------------------------
-DATA_FILE = './data/synthetic_data.csv'  # CSV with columns: utterance,intent
-MODEL_DIR = './models/classifier'
+# --- 0. Setup ---
+os.environ["WANDB_DISABLED"] = "true"
+load_dotenv()  # Load .env file
 
-if not os.path.exists(MODEL_DIR):
-    os.makedirs(MODEL_DIR)
+# --- 1. Constants ---
+MODEL_CHECKPOINT = "distilbert-base-uncased"
+DB_SECRET_NAME = "POSTGRES_CONNECTION_STRING"
+MODEL_OUTPUT_DIR = "./intent_model"
 
-# -------------------------------
-# Load dataset
-# -------------------------------
-df = pd.read_csv(DATA_FILE)
-texts = df['utterance'].tolist()
-intents = df['intent'].tolist()
+# --- 2. Database Utilities ---
+def get_db_engine():
+    connection_string = os.environ.get(DB_SECRET_NAME)
+    if not connection_string:
+        print(f"❌ Database connection string not found. Set {DB_SECRET_NAME} in your .env file.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        engine = create_engine(connection_string)
+        with engine.connect() as conn:
+            print("✅ Successfully connected to PostgreSQL Database!")
+        return engine
+    except Exception as e:
+        print(f"❌ Failed to connect to PostgreSQL: {e}", file=sys.stderr)
+        sys.exit(1)
 
-# Create label map
-unique_intents = sorted(list(set(intents)))
-label_map = {intent: idx for idx, intent in enumerate(unique_intents)}
-labels = [label_map[intent] for intent in intents]
+def fetch_data_from_table(engine, table_name):
+    try:
+        df = pd.read_sql(f"SELECT * FROM {table_name}", engine)
+        print(f"✅ Fetched {len(df)} rows from '{table_name}'.")
+        return df
+    except Exception as e:
+        print(f"❌ Failed to read table '{table_name}': {e}", file=sys.stderr)
+        return pd.DataFrame()
 
-# Create Hugging Face dataset
-dataset = Dataset.from_dict({"text": texts, "labels": labels})
+# --- 3. Metrics ---
+def compute_metrics(eval_pred):
+    predictions, labels = eval_pred
+    predictions = np.argmax(predictions, axis=1)
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, predictions, average='macro')
+    acc = accuracy_score(labels, predictions)
+    return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
 
-# -------------------------------
-# Tokenizer
-# -------------------------------
-tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
+# --- 4. Training ---
+def train_model():
+    engine = get_db_engine()
+    train_df = fetch_data_from_table(engine, "train_set")
+    test_df = fetch_data_from_table(engine, "test_set")
 
-def tokenize(batch):
-    return tokenizer(batch['text'], padding=True, truncation=True, max_length=128)
+    if train_df.empty or test_df.empty:
+        print("❌ Cannot proceed with training. Check database tables.")
+        return
 
-dataset = dataset.map(tokenize, batched=True)
-dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
+    # Map labels to integers
+    all_intents = sorted(train_df['intent'].astype(str).unique())
+    label2id = {label: i for i, label in enumerate(all_intents)}
+    id2label = {i: label for i, label in enumerate(all_intents)}
+    num_labels = len(all_intents)
+    print(f"Found {num_labels} unique intents.")
 
-# -------------------------------
-# Model
-# -------------------------------
-num_labels = len(unique_intents)
-model = DistilBertForSequenceClassification.from_pretrained(
-    'distilbert-base-uncased',
-    num_labels=num_labels
-)
+    # Convert pandas to Hugging Face Dataset
+    train_dataset = Dataset.from_pandas(train_df)
+    test_dataset = Dataset.from_pandas(test_df)
 
-# -------------------------------
-# Training arguments (compatible with older versions)
-# -------------------------------
-training_args = TrainingArguments(
-    output_dir=MODEL_DIR,
-    num_train_epochs=3,
-    per_device_train_batch_size=16,
-    logging_dir='./logs',
-    logging_steps=50,
-    save_total_limit=1  # Keeps only last checkpoint
-)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_CHECKPOINT)
 
-# -------------------------------
-# Trainer
-# -------------------------------
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=dataset,
-    eval_dataset=dataset  # Using same dataset for eval; fine for small synthetic dataset
-)
+    def preprocess_function(examples):
+        tokenized = tokenizer(examples['utterance'], padding=True, truncation=True)
+        tokenized['label'] = [label2id[label] for label in examples['intent']]
+        return tokenized
 
-# -------------------------------
-# Train
-# -------------------------------
-trainer.train()
+    print("Tokenizing datasets...")
+    tokenized_train_dataset = train_dataset.map(preprocess_function, batched=True)
+    tokenized_test_dataset = test_dataset.map(preprocess_function, batched=True)
 
-# -------------------------------
-# Save model, tokenizer, label map
-# -------------------------------
-model.save_pretrained(MODEL_DIR)
-tokenizer.save_pretrained(MODEL_DIR)
+    print("Loading model for sequence classification...")
+    model = AutoModelForSequenceClassification.from_pretrained(
+        MODEL_CHECKPOINT,
+        num_labels=num_labels,
+        id2label=id2label,
+        label2id=label2id
+    )
 
-with open(os.path.join(MODEL_DIR, 'label_map.json'), 'w') as f:
-    json.dump(label_map, f)
+    # Training Arguments (compatible with older transformers)
+    training_args = TrainingArguments(
+        output_dir="./training_output",
+        num_train_epochs=5,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=16,
+        weight_decay=0.01,
+        logging_steps=10,
+        do_eval=True,
+        save_total_limit=2
+    )
 
-print(f"Training complete. Model and tokenizer saved to {MODEL_DIR}")
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_train_dataset,
+        eval_dataset=tokenized_test_dataset,
+        tokenizer=tokenizer,
+        compute_metrics=compute_metrics
+    )
+
+    print("🚀 Starting training...")
+    trainer.train()
+
+    print("\n--- Final Model Evaluation ---")
+    eval_results = trainer.evaluate()
+    print(eval_results)
+
+    print(f"\n✅ Training complete. Saving model to '{MODEL_OUTPUT_DIR}'")
+    trainer.save_model(MODEL_OUTPUT_DIR)
+    tokenizer.save_pretrained(MODEL_OUTPUT_DIR)
+    print("Model saved successfully.")
+
+
+class IntentPredictor:
+    def __init__(self, model_path):
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"No model found at {model_path}")
+        print(f"Loading model from {model_path}...")
+        self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.model.eval()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        print(f"✅ Predictor loaded. Using device: {self.device}")
+
+    def predict(self, texts):
+        """Batch prediction for multiple sentences"""
+        if isinstance(texts, str):
+            texts = [texts]
+        inputs = self.tokenizer(texts, return_tensors="pt", truncation=True, padding=True).to(self.device)
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            probs = torch.softmax(outputs.logits, dim=-1)
+            confs, pred_ids = torch.max(probs, dim=1)
+
+        results = []
+        for i in range(len(texts)):
+            intent = self.model.config.id2label[pred_ids[i].item()]
+            confidence = confs[i].item()
+            results.append((texts[i], intent, confidence))
+        return results
+
+# --- 6. Main Execution ---
+if __name__ == "__main__":
+    train_model()
+
+    print("\n--- Testing Predictions ---")
+    try:
+        predictor = IntentPredictor(MODEL_OUTPUT_DIR)
+        test_sentences = [
+            "my bag didn't show up at JFK",
+            "i need to reschedule my flight",
+            "how much is a ticket to tokyo?",
+            "what's the pet policy?",
+            "my guitar case is broken",
+            "is my flight on time?"
+        ]
+        results = predictor.predict(test_sentences)
+        for text, intent, conf in results:
+            print(f"Text: '{text}'")
+            print(f"Predicted Intent: '{intent}' (Confidence: {conf:.2f})\n")
+    except FileNotFoundError:
+        print("Skipping prediction — model not found.")
