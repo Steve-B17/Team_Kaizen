@@ -78,7 +78,8 @@ INTENT_URL_MAP = {
             "https://www.goindigo.in/add-on-services/delayed-and-lost-baggage-protection.html"
         ],
         "pet_travel": [
-            "https://www.airindia.com/in/en/travel-information/first-time-flyers/carriage-of-pets.html"
+            "https://www.airindia.com/in/en/travel-information/first-time-flyers/carriage-of-pets.html",
+            "https://www.jetblue.com/traveling-together/traveling-with-pets"
         ],
         "prohibited_items_faq": [
             "https://www.emirates.com/in/english/before-you-fly/travel/dangerous-goods-policy/"

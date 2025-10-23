@@ -1,5 +1,1 @@
 .env
-/training_output/
-__pycache__/
-intent_model/
-challenger_model/
