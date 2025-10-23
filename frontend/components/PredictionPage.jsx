@@ -26,8 +26,12 @@ function PredictionPage({ onPredictionCorrect }) {
         const response = await fetch(`${API_BASE_URL}/intents`);
         if (!response.ok) throw new Error('Failed to fetch intents.');
         const data = await response.json();
-        setAllIntents(data);
+        
+        // ✅ FIX: The API returns {intents: [...], count: N}
+        // So we need to access data.intents, not just data
+        setAllIntents(data.intents || []);
       } catch (err) {
+        console.error('Error fetching intents:', err);
         setError('Could not connect to API to get intents.');
       }
     };
@@ -44,6 +48,7 @@ function PredictionPage({ onPredictionCorrect }) {
     setError('');
     setPrediction(null);
     setShowFeedbackOptions(false);
+    setSelectedIntent(''); // ✅ Reset selected intent on new prediction
 
     try {
       const response = await fetch(`${API_BASE_URL}/predict`, {
@@ -66,6 +71,12 @@ function PredictionPage({ onPredictionCorrect }) {
   const handleFeedback = async (isCorrect) => {
     if (!prediction) return;
 
+    // ✅ Validation: if incorrect, must select an intent
+    if (!isCorrect && !selectedIntent) {
+      alert('Please select the correct intent from the dropdown.');
+      return;
+    }
+
     let feedbackBody = {
       utterance: prediction.utterance,
       predicted_intent: prediction.predicted_intent,
@@ -73,32 +84,31 @@ function PredictionPage({ onPredictionCorrect }) {
       correct_intent: isCorrect ? null : selectedIntent,
     };
 
-    if (!isCorrect && !selectedIntent) {
-      alert('Please select the correct intent from the dropdown.');
-      return;
-    }
-
     try {
-      await fetch(`${API_BASE_URL}/feedback`, {
+      const response = await fetch(`${API_BASE_URL}/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(feedbackBody),
       });
 
+      if (!response.ok) {
+        throw new Error('Failed to submit feedback');
+      }
+
       if (isCorrect) {
-        // --- THIS IS THE NEW PART ---
-        // Call the function from App.jsx to "redirect"
+        // Call the function from App.jsx to navigate to RAG page
         onPredictionCorrect(prediction.predicted_intent);
       } else {
         // Reset the UI after incorrect feedback is sent
-        alert('Thank you for your feedback!');
+        alert('Thank you for your feedback! We\'ll use this to improve the model.');
         setPrediction(null);
         setUtterance('');
         setShowFeedbackOptions(false);
+        setSelectedIntent(''); // ✅ Reset selected intent
       }
 
     } catch (err) {
-      setError('Failed to submit feedback.');
+      setError('Failed to submit feedback: ' + err.message);
     }
   };
 
@@ -145,6 +155,9 @@ function PredictionPage({ onPredictionCorrect }) {
               </div>
             ) : (
               <div className="correction-form">
+                <p style={{ color: '#666', fontSize: '14px', marginBottom: '8px' }}>
+                  Please select the correct intent:
+                </p>
                 <select
                   value={selectedIntent}
                   onChange={(e) => setSelectedIntent(e.target.value)}
@@ -154,7 +167,24 @@ function PredictionPage({ onPredictionCorrect }) {
                     <option key={intent} value={intent}>{intent}</option>
                   ))}
                 </select>
-                <button onClick={() => handleFeedback(false)}>Submit Correction</button>
+                <div className="button-group">
+                  <button 
+                    onClick={() => handleFeedback(false)}
+                    disabled={!selectedIntent}
+                    style={{ opacity: selectedIntent ? 1 : 0.5 }}
+                  >
+                    Submit Correction
+                  </button>
+                  <button 
+                    onClick={() => {
+                      setShowFeedbackOptions(false);
+                      setSelectedIntent('');
+                    }}
+                    className="btn-cancel"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -164,4 +194,4 @@ function PredictionPage({ onPredictionCorrect }) {
   );
 }
 
-export default PredictionPage;  
+export default PredictionPage;
